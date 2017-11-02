@@ -1,0 +1,232 @@
+component sdo_download "SDO Download";
+
+option userspace yes;
+option userinit yes;
+
+option default_count 1;
+
+/*
+0 -> 1: send, setflag=1
+1 -> 0:  setflag=0
+
+*/
+variable u32 setflag;
+pin in bit ENABLE = false; 
+pin in u32 SLAVEPOSITION;
+pin in u32 INDEX;
+pin in u32 SUBINDEX;
+pin in u32 DATATYPE;
+pin in u32 DATAU;
+pin in s32 DATAS;
+
+pin out u32 ERRORPIN;
+
+
+
+license "LGPL";
+
+;;
+
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+
+
+const char *tArg[8] = 
+{  
+ "-tbool", // datatype 0
+ "-tint8", // datatype 1
+ "-tint16", // datatype 2
+ "-tint32", // datatype 3
+ "-tfloat", // datatype 4
+ "-tuint8", // datatype 5
+ "-tuint16", // datatype 6
+ "-tuint32" // datatype 7
+};
+
+
+static void userinit(int argc, char **argv)
+{
+   if (strstr(argv[1],"count=")!=NULL)
+       count = strtoul(strchr(argv[1],'=')+1,NULL, 10);
+ // rtapi_print_msg(3," SDO argv: %s", argv[1]);
+}
+
+/*****************************************************/
+
+/*****************************************************/
+void user_mainloop(void)
+{ 
+    
+
+   while (1)
+    {
+      usleep(1000);
+      FOR_ALL_INSTS() {
+            if ((ENABLE) && (!setflag))
+                      {
+                         char *command = calloc(128, sizeof(uint8_t)) ;
+                         
+
+                         char template[] = "/tmp/SDODXXXXXX";
+                         int tempfd;
+                         tempfd = mkstemp(template);
+
+                         char slavePos [10] = {'-','p'};
+
+                         if (sprintf(&slavePos[2], "%u", (uint32_t)SLAVEPOSITION ) <=0 )
+                         {
+                             free(command);
+                            //goto FAIL0;
+                             ERRORPIN = 0x1;
+                             //ENABLE = false;
+                             continue; 
+                         }
+                         
+                         if (DATATYPE > 7)
+                         {
+                            free(command);
+                            ERRORPIN = 0x1;
+                            //ENABLE = false;
+                            continue; 
+                         }
+
+                         char slaveIdx [7];
+                         if (sprintf(slaveIdx, "0x%04x", (uint32_t) INDEX) <0)
+                          {
+                            free(command);
+                            ERRORPIN = 0x1;
+                            //ENABLE = false;
+                            continue; 
+                          }
+                         
+                         char slaveSubIdx [3];
+                         if (SUBINDEX>32)
+                         {
+                            free(command);
+                            ERRORPIN = 0x1;
+                            //ENABLE = false;
+                            continue; 
+                         }
+                         if (sprintf(slaveSubIdx, "%u", (uint8_t)SUBINDEX)<=0)
+                         {
+                            free(command);
+                            ERRORPIN = 0x1; // parameter rejected by comp parser
+                            //ENABLE = false;
+                            continue; 
+                         }
+                         
+                         char dataString[11];
+
+                         if ((DATATYPE>4) || (DATATYPE==0))
+                         {
+                             if(snprintf(dataString, 11, "0x%08x", (uint32_t)DATAU)<0)
+                             {
+                              free(command);
+                               ERRORPIN = 0x1;
+                               //ENABLE = false;
+                               continue; 
+                             }
+                         }
+                         if ((DATATYPE>=1) && (DATATYPE<4))
+                         {
+                          int temp = DATAS;
+                           if(snprintf(dataString, 11, "0x%08x", *(volatile unsigned int *)(volatile int *)(&temp) ) < 0 )  
+                             {
+                              free(command);
+                              ERRORPIN = 0x1;
+                              //ENABLE = false;
+                              continue; 
+                             }
+                             
+                         }
+                          if ((DATATYPE==4))
+                         {                            
+                            float temp = DATAS;
+                            if(snprintf(dataString, 11, "0x%08x",  *(volatile unsigned int *)(volatile float *) (&temp))<0)  // float ???
+                             {
+                              free(command);
+                              ERRORPIN = 0x1;
+                              //ENABLE = false;
+                              continue; 
+                             }
+                             
+                         }
+                         
+                         
+                         
+                         int ret = sprintf(command, "ethercat download %s %s %s %s %s >%s 2>&1", slavePos, tArg[DATATYPE], slaveIdx, slaveSubIdx, dataString, template);
+                          
+                         if (ret<=0)
+                          {
+                              free(command);
+                              ERRORPIN = 0x1;
+                              //ENABLE = false;
+                              continue; 
+                          }
+                        rtapi_print_msg(RTAPI_MSG_ERR,"SDO: %s\n", command );
+
+                        /* Open the command for reading. */
+                         FILE *fp;
+                         fp = popen(command, "r");
+                         
+                         if (fp == NULL)
+                         {
+                            rtapi_print_msg(RTAPI_MSG_ERR,"Failed to open stream for %s\n", command );
+                            pclose(fp);
+                            free(command);
+                            ERRORPIN = 0x100; // unable to open a shell pipe
+                            //ENABLE = false;
+                            continue; 
+                         }
+
+                         if (ferror(fp)!=0)
+                        {
+                          rtapi_print_msg(RTAPI_MSG_ERR,"File Stream error %d\n", ferror(fp) );
+                          pclose(fp);
+                          free(command);
+                          ERRORPIN = 0x100; // IO error on shell pipe
+                          //ENABLE = false;
+                          continue; 
+                        }
+                        
+                        pclose(fp);
+                        FILE *buffile = fopen(template, "r");
+                        if (buffile==NULL)
+                            rtapi_print_msg(RTAPI_MSG_ERR,"Cannot open %s", template);
+
+                        char errmessage[32];
+                        if (fgets( errmessage, sizeof(errmessage)-1, (FILE*)buffile)!=NULL)
+                        {
+                           rtapi_print_msg(RTAPI_MSG_ERR,"%s", errmessage);
+                           free(command);
+                           fclose(buffile);
+                           ERRORPIN = 0x10; // system error message recived when SDO sent 
+                           //ENABLE = false;
+                           continue; 
+                        }
+
+                        
+
+                        /* close */
+                        // pclose(fp);
+                         free(command);
+                         //ENABLE = false;
+                         setflag = true;
+                         ERRORPIN = 0x0;
+                         continue;
+
+                  } // if (ENABLE)
+
+                  if ((!ENABLE) && (setflag))
+                  {
+                     setflag = false;
+                     continue;
+                  }             
+       } // FOR_ALL_INSTS
+   } //while
+   
+}
